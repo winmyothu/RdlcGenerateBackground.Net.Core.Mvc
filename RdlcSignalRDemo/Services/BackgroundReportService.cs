@@ -25,43 +25,49 @@ namespace RdlcSignalRDemo.Services
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var generator = scope.ServiceProvider.GetRequiredService<ReportGeneratorService>();
 
-                // Get first pending job
-                var job = await db.ReportJobs
+                // Get all pending jobs
+                var jobs = await db.ReportJobs
                     .Where(j => j.Status == JobStatus.Pending)
-                    .FirstOrDefaultAsync(stoppingToken);
+                    .OrderBy(j => j.CreatedUtc)
+                    .ToListAsync(stoppingToken);
 
-                if (job != null)
-                {
-                    try
-                    {
-                        job.Status = JobStatus.InProgress;
-                        job.Progress = 10;
-                        await db.SaveChangesAsync(stoppingToken);
-                        await SendUpdate(job);
+                // Start all pending jobs in parallel
+                var tasks = jobs.Select(job => ProcessJobAsync(job, db, generator, stoppingToken)).ToList();
 
-                        await Task.Delay(500, stoppingToken);
-                        job.Progress = 40;
-                        await db.SaveChangesAsync(stoppingToken);
-                        await SendUpdate(job);
+                if (tasks.Count > 0)
+                    await Task.WhenAll(tasks);
 
-                        string fileName = await generator.GeneratePdfAsync(job.ReportName);
-                        job.FilePath = fileName;
-                        job.Progress = 100;
-                        job.Status = JobStatus.Completed;
-                        await db.SaveChangesAsync(stoppingToken);
-                        await SendUpdate(job);
-                    }
-                    catch
-                    {
-                        job.Status = JobStatus.Failed;
-                        await db.SaveChangesAsync(stoppingToken);
-                        await SendUpdate(job);
-                    }
-                }
-                else
-                {
-                    await Task.Delay(500, stoppingToken);
-                }
+                await Task.Delay(500, stoppingToken); // small delay to reduce CPU usage
+            }
+        }
+
+        private async Task ProcessJobAsync(ReportJob job, AppDbContext db, ReportGeneratorService generator, CancellationToken token)
+        {
+            try
+            {
+                job.Status = JobStatus.InProgress;
+                job.Progress = 10;
+                await db.SaveChangesAsync(token);
+                await SendUpdate(job);
+
+                await Task.Delay(200, token);
+                job.Progress = 40;
+                await db.SaveChangesAsync(token);
+                await SendUpdate(job);
+
+                // Generate PDF in parallel (thread-safe, unique file per job)
+                string fileName = await generator.GeneratePdfAsync(job.ReportName);
+                job.FilePath = fileName;
+                job.Progress = 100;
+                job.Status = JobStatus.Completed;
+                await db.SaveChangesAsync(token);
+                await SendUpdate(job);
+            }
+            catch
+            {
+                job.Status = JobStatus.Failed;
+                await db.SaveChangesAsync(token);
+                await SendUpdate(job);
             }
         }
         private async Task SendUpdate(ReportJob job)
